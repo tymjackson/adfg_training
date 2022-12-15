@@ -1,0 +1,181 @@
+---
+title: "Von Bertalanffy Growth in Weathervane Scallops"
+author: "Tyler Jackson"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+# Introduction
+
+This exercise will load size and age data collected as part of the weathervane scallop (*patinopectan carinus*) dredge survey (Burt et al. 2021) and fit a Von Bertalanffy growth model based on the Schnute (1981) parameterization in which 
+
+$$L_{a, \gamma} = L_{\infty, \gamma} + (L_{1, \gamma} - L_{\infty, \gamma}) e^{-k_{\gamma}(a-a_{1})}$$
+
+where  
+
+$L_{a, \gamma}$ = mean size at age for sex $\gamma$;  
+$L_{\infty, \gamma}$ = mean asymptotic size for sex $\gamma$;  
+$L_{1, \gamma}$ = is the mean size of sex $\gamma$ at $a_{1}$; 
+$a_{1}$ = minimum age well represented in the data;  
+$k_{\gamma}$ = growth coefficient for sex $\gamma$.  
+
+Mean asymptotic size ($L_{\infty, \gamma}$) is computed as  
+
+$$L_{\infty, \gamma} = L_{1, \gamma} + \frac{L_{2, \gamma} - L_{1, \gamma}}{1-e^{-k_{\gamma}(a_{2}-a_{1})}}$$
+
+where  
+
+$L_{2, \gamma}$ = is the mean size of sex $\gamma$ at $a_{2}$;  
+$a_{2}$ = maximum age well represented in the data. 
+
+Thus, three parameters are estimated separately by sex: $L_{1, \gamma}$, $L_{2, \gamma}$, and $k_{\gamma}$.
+
+# Methods
+## Loading and Visualizing Data
+```{r loaddata, echo = T, message = F, warning = F, eval = T}
+
+library(tidyverse)
+
+# load data
+read_csv("../data/scallop_asl.csv") %>%
+  # remove unknown sex
+  filter(sex %in% 1:2) %>%
+  # add text column for sex
+  mutate(sex_text = case_when(sex == 1 ~ "Male",
+                              sex == 2 ~ "Female")) -> asl
+```
+
+The data contain `r prettyNum(nrow(asl), big.mark = ",")` observations, `r prettyNum(nrow(asl[asl$sex == 1,]), big.mark = ",")` of which are males and `r prettyNum(nrow(asl[asl$sex == 2,]), big.mark = ",")` of which are females. 
+
+```{r plot, echo = F, message = F, warning = F, eval = T, fig.align = 'center', fig.cap = "**Figure 1.** Shell height (mm) at age (yr) among weathervane scallops."}
+# plot data
+ggplot()+
+  geom_point(data = asl, aes(x = age, y = shell_height))+
+  labs(x = "Age (yr)", y = "Shell Height (mm)") +
+  facet_wrap(~sex_text)+
+  theme_bw() -> p1
+
+p1
+```
+
+
+
+## Fitting Models
+We will fit the Schnute (1981) LvB growth curve using the `mle2` function within the *bbmle* R package (Bolker et al. 2022). A model will be fit to both male an female scallops separately, and a third model will be fit using all of the data.
+
+```{r modfuncs, echo = F, message = F, warning = F} 
+library(bbmle)
+
+# lvb function to compute predicted values
+lvb <- function(age, a1, a2, k, L1, L2) {
+  
+  Linf = L1 + (L2 - L1) / (1 - exp(-k * (a2-a1)))
+  L = Linf + (L1 - Linf) * exp(-k * (age - a1))
+  
+  return(L)
+  
+}
+
+# negative log-likelihood function
+nll <- function(data, a1, a2, ln_k, ln_L1, ln_L2, ln_sigma) {
+  
+  # extract data
+  age = data$age
+  obs_size = data$shell_height
+  
+  # transform lvb parameters
+  k = exp(ln_k)
+  L1 = exp(ln_L1)
+  L2 = exp(ln_L2)
+  
+  # compute predicted values
+  pred = lvb(age, a1, a2, k, L1, L2)
+  
+  # compute nll
+  nll <- -sum(dnorm(x = obs_size, mean = pred, sd = exp(ln_sigma), log = T))
+  
+  return(nll)
+  
+}
+
+```
+
+```{r modfit, echo = T, message = F, warning = F} 
+
+# fit to males
+fit_m <- mle2(nll,
+              start = list(ln_k = 0, ln_L1 = log(80), ln_L2 = log(160), ln_sigma = 0),
+              data = list(data = filter(asl, sex == 1), a1 = 2, a2 = 18),
+              method="Nelder-Mead",
+              optimizer = "nlminb",
+              control=list(maxit=1e6))
+            
+
+# fit to females
+fit_f <- mle2(nll,
+              start = as.list(coef(fit_m)),
+              data = list(data = filter(asl, sex == 2), a1 = 2, a2 = 18),
+              method="Nelder-Mead",
+              optimizer = "nlminb",
+              control=list(maxit=1e6))
+
+# all data fit
+fit <- mle2(nll,
+            start = as.list(coef(fit_m)),
+            data = list(data = asl, a1 = 2, a2 = 18),
+            method="Nelder-Mead",
+            optimizer = "nlminb",
+            control=list(maxit=1e6))
+
+```
+
+
+# Results
+
+```{r resulttab, echo = F, message = F, warning = F} 
+
+library(knitr); library(kableExtra)
+
+# create function to do log back-transformation with bias correction
+## args: model = model object; pars = character string of parameters to back transform
+back_transform <- function(model, pars) {
+  # extract position
+  pos = which(names(coef(model)) %in% pars)
+  # do transformation
+  coefs = as.numeric(exp(coef(model) + sqrt(diag(vcov(model))) / 2)[pos])
+  
+  return(coefs)
+  
+}
+
+# create table
+tibble(Parameter = c("$k$", "$L_{1}$", "$L_{2}$"),
+       Male = back_transform(fit_m, c("ln_k", "ln_L1", "ln_L2")),
+       Female = back_transform(fit_f, c("ln_k", "ln_L1", "ln_L2")),
+       Both = back_transform(fit, c("ln_k", "ln_L1", "ln_L2"))) -> par_est
+kbl(par_est, align = c("lccc"), digits = 3,
+    caption = "**Table 1.** Parameter estimates for Schnute (1981) LvB growth of weathervane scallops from male only, female only, and all data models.") %>%
+  kable_classic(full_width = F)
+
+```
+
+```{r fittedvals, echo = F, message = F, warning = F} 
+
+# compute fitted values
+par_est <- as.data.frame(par_est)
+bind_rows(asl, asl %>% mutate(sex = 0, sex_text = "All Sex")) %>%
+  mutate(pred = case_when(sex == 1 ~ lvb(age, a1 = 2, a2 = 18, k = par_est[1, 2], L1 = par_est[2, 2], L2 = par_est[3, 2]),
+                          sex == 2 ~ lvb(age, a1 = 2, a2 = 18, k = par_est[1, 3], L1 = par_est[2, 3], L2 = par_est[3, 3]),
+                          sex == 0 ~ lvb(age, a1 = 2, a2 = 18, k = par_est[1, 3], L1 = par_est[2, 3], L2 = par_est[3, 3]))) -> fits
+```
+
+```{r resplot, echo = F, message = F, warning = F, eval = T, fig.align = 'center', fig.cap = "**Figure 2.** Fits to size at age data for weathervane scallops based on male only, female only, and both sex models."}
+# plot data
+ggplot()+
+  geom_point(data = asl, aes(x = age, y = shell_height), alpha = 0.2)+
+  geom_line(data = fits, aes(x = age, y = pred, color = sex_text))+
+  labs(x = "Age (yr)", y = "Shell Height (mm)", color = NULL)+
+  theme_bw() -> p2
+
+p2
+```
